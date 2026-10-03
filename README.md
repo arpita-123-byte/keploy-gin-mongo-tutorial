@@ -52,5 +52,5 @@ next.config.ts      MDX + rehype plugin setup
 
 ## Deploy
 
-Import the repository at [vercel.com/new]. The default
+Import the repository at [vercel.com/new](https://vercel.com/new). The default
 Next.js settings work; no environment variables are needed.
