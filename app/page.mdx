@@ -1,0 +1,446 @@
+import { Callout } from "@/components/callout";
+import { Checklist } from "@/components/checklist";
+import { FlowDiagram } from "@/components/flow-diagram";
+import { Tab, Tabs } from "@/components/tabs";
+
+# Test a Gin + MongoDB API without writing a single test
+
+<div className="lead">
+  Keploy records the real traffic going in and out of your Go service and turns
+  it into test cases and database mocks. In this tutorial you record two API
+  calls to a URL shortener, then replay them as tests.
+</div>
+
+<div className="meta">About 15 minutes. No Keploy experience needed. Tested with Keploy 3.8.58 on Windows 11 with WSL (Ubuntu).</div>
+
+<FlowDiagram />
+
+## What Keploy does, in plain words
+
+Testing an API that talks to a database usually means two chores: writing the
+test (send this request, expect that response) and faking the database so the
+test does not need a live MongoDB.
+
+Keploy does both by watching. While your app runs under `keploy record`, it
+sits on the network path and captures two things for every request:
+
+- **The HTTP call** your app received and the response it sent back. This
+  becomes a test case.
+- **Every call your app made to MongoDB**, with the reply. This becomes a mock.
+
+Later, `keploy test` starts your app again, sends the saved requests itself,
+answers the database calls from the saved mocks, and compares each new response
+with the recorded one. Flip the switch in the diagram above to see the two
+modes.
+
+<Callout type="tip" title="Why a Go developer should care">
+  You change no Go code and import no SDK. There is no `_test.go` file to write
+  and no mock interface to maintain. The tests come from behaviour your app
+  already has, so they are useful as a safety net before a refactor.
+</Callout>
+
+## Before you start
+
+<Checklist
+  items={[
+    {
+      label: "Docker is installed and running",
+      hint: "Docker Desktop must say Engine running. Check with docker version: you should see a Server section.",
+    },
+    {
+      label: "Git and curl are available",
+      hint: "To clone the sample and send requests.",
+    },
+    {
+      label: "A supported machine",
+      hint: "Linux with kernel 5.10 or newer (check with uname -r), macOS on Apple Silicon, or Windows on x86-64. WSL also works.",
+    },
+    {
+      label: "Go 1.22 or newer",
+      hint: "Only needed if you run the app natively instead of in Docker.",
+    },
+    {
+      label: "A free Keploy account",
+      hint: "The first keploy record asks you to sign in.",
+    },
+  ]}
+/>
+
+## 1. Install Keploy
+
+One command installs the CLI on Linux and on macOS (Apple Silicon):
+
+```bash title="Terminal"
+curl --silent -O -L https://keploy.io/install.sh && source install.sh
+```
+
+Check that it worked:
+
+```bash title="Terminal"
+keploy --version
+```
+
+### On Windows, use WSL
+
+Keploy also ships a native `keploy.exe`, but the build is not code-signed yet
+and Windows Defender can refuse to run it. Running Keploy inside WSL (Ubuntu
+on Windows) avoids that, and Docker Desktop needs WSL anyway.
+
+```powershell title="PowerShell"
+wsl --install -d Ubuntu
+```
+
+Restart if asked, open **Ubuntu** from the Start menu, then in Docker Desktop
+go to **Settings → Resources → WSL integration** and switch on Ubuntu. Run the
+install command above inside the Ubuntu window.
+
+<Callout type="warning" title="From here on, every command runs in Ubuntu">
+  Not PowerShell. Keploy, Docker, `git clone` and `curl` all run in the Ubuntu
+  window, so they see the same files and the same `localhost`.
+</Callout>
+
+<Callout type="info" title="How it captures traffic">
+  On Linux, Keploy uses eBPF in the kernel, which is why `keploy record` and
+  `keploy test` need root there. On macOS and Windows it intercepts in user
+  space and needs no `sudo`.
+</Callout>
+
+## 2. Get the sample app
+
+```bash title="Terminal"
+git clone https://github.com/keploy/samples-go.git
+cd samples-go/gin-mongo
+```
+
+It is a small URL shortener: two Go files, one MongoDB collection.
+
+- `POST /url` takes a long URL, stores it, and returns a short one.
+- `GET /:code` looks the code up and redirects to the original URL.
+
+One detail is worth knowing before you record. The short code is not random.
+It is derived from a SHA-256 hash of the URL:
+
+```go title="handler.go" showLineNumbers{112}
+func GenerateShortLink(initialLink string) string {
+	urlHashBytes := sha256Of(initialLink)
+	generatedNumber := new(big.Int).SetBytes(urlHashBytes).Uint64()
+	finalString := base58Encoded([]byte(fmt.Sprintf("%d", generatedNumber)))
+	return finalString[:8]
+}
+```
+
+So `https://google.com` always shortens to `Lhr4BWAi`, on any machine. That is
+what makes the response repeatable enough to test.
+
+## 3. Start recording
+
+Pick one route. Both produce the same test files.
+
+<Tabs>
+<Tab label="Docker Compose (easiest)">
+
+The app and MongoDB both run in containers. The compose file expects a Docker
+network that already exists, so create it first:
+
+```bash title="Terminal"
+docker network create keploy-network
+```
+
+Next, build the image and check the app starts on its own, before Keploy is
+involved:
+
+```bash title="Terminal"
+docker compose up --build
+```
+
+Wait for the Gin routes (`POST /url`, `GET /:param`) in the log. Then press
+`Ctrl+C` and clean up:
+
+```bash title="Terminal"
+docker compose down
+```
+
+This step is not in the official guide, but it is what got my requests through.
+With the image already built, a failure at this point is a Docker problem, not
+a Keploy one, and the recording in the next command starts quickly.
+
+Now start everything under Keploy:
+
+```bash title="Terminal"
+keploy record -c "docker compose up" --container-name "ginMongoApp"
+```
+
+- `-c` is the command Keploy runs to start your app.
+- `--container-name` tells Keploy which container's traffic to capture. It
+  must match `container_name` in `docker-compose.yaml`.
+
+On Linux and WSL you do not need to type `sudo`. Keploy needs root for eBPF
+and re-runs itself with `sudo` when it has to, so it may ask for your password.
+
+<Callout type="warning" title="If compose fails with “network keploy-network declared as external, but could not be found”">
+  You skipped the `docker network create` line. The compose file marks the
+  network as `external`, so Compose will not create it for you.
+</Callout>
+
+</Tab>
+<Tab label="Run the app natively">
+
+Here only MongoDB runs in Docker. The Go app runs on your machine.
+
+**First, point the app at localhost.** The code connects to a host called
+`mongoDb`, which only resolves inside the Docker network:
+
+```go title="main.go" showLineNumbers{33} {3}
+	dbName, collection := "keploy", "url-shortener"
+
+	client, err := New("mongoDb:27017", dbName)
+	if err != nil {
+```
+
+Change line 35 to:
+
+```go title="main.go"
+	client, err := New("localhost:27017", dbName)
+```
+
+**Second, start MongoDB** in its own terminal and leave it running:
+
+```bash title="Terminal 1"
+docker network create keploy-network
+docker compose up mongo
+```
+
+**Third, build the app and record:**
+
+```bash title="Terminal 2"
+go build -o url-shortener .
+keploy record -c "./url-shortener"
+```
+
+If Linux reports a permission error, put `sudo` in front. Building a binary first, instead of
+using `go run`, keeps the command the same on every OS.
+
+</Tab>
+</Tabs>
+
+When the
+Gin routes (`POST /url`, `GET /:param`) appear in the log, the app is up and
+Keploy is listening. Leave this terminal open.
+
+<Callout type="info">
+  Keploy asks you to sign in and prints a link. Open it in your browser within
+  60 seconds, approve, then return to the terminal. In WSL the browser does not
+  open on its own, so copy the link.
+</Callout>
+
+## 4. Make two requests
+
+Open a new terminal. Each request you send now becomes one test case.
+
+**Shorten a URL:**
+
+```bash title="Terminal"
+curl --request POST \
+  --url http://localhost:8080/url \
+  --header 'content-type: application/json' \
+  --data '{"url": "https://google.com"}'
+```
+
+```json title="Response"
+{
+  "ts": 1718943885198315028,
+  "url": "http://localhost:8080/Lhr4BWAi"
+}
+```
+
+Your `ts` will differ. It is the current time in nanoseconds.
+
+<Callout type="warning" title="curl: (7) Failed to connect to localhost port 8080">
+  The app is not running yet. Nothing is wrong with the request. Run
+  `docker ps`: if `ginMongoApp` is not in the list, the app never started. Stop
+  the recording, run `docker compose up --build` on its own as shown in step 3
+  to confirm the app comes up, then start `keploy record` again.
+</Callout>
+
+**Follow the short link:**
+
+```bash title="Terminal"
+curl --request GET --url http://localhost:8080/Lhr4BWAi
+```
+
+```html title="Response"
+<a href="https://google.com">See Other</a>.
+```
+
+That small HTML snippet is correct. The app answers with a `303 See Other`
+redirect, and curl does not follow redirects unless you pass `-L`.
+
+Now go back to the Keploy terminal and press `Ctrl+C` to stop recording.
+
+## 5. Look at what Keploy wrote
+
+A new `keploy` folder sits next to your code:
+
+```plaintext title="samples-go/gin-mongo"
+keploy/
+└── test-set-0/
+    ├── mocks.yaml          # every MongoDB call and its reply
+    └── tests/
+        ├── test-1.yaml     # POST /url
+        └── test-2.yaml     # GET /Lhr4BWAi
+```
+
+A test case is the request, the response, and the rules for comparing them.
+Here is the second one, trimmed:
+
+```yaml title="keploy/test-set-0/tests/test-2.yaml (trimmed)"
+kind: Http
+name: test-2
+spec:
+    req:
+        method: GET
+        url: http://localhost:8080/Lhr4BWAi
+    resp:
+        status_code: 303
+        header:
+            Content-Type: text/html; charset=utf-8
+            Location: https://google.com
+        body: |+
+            <a href="https://google.com">See Other</a>.
+    assertions:
+        noise:
+            header.Date: []
+```
+
+`noise` lists fields Keploy should ignore when comparing. The `Date` header is
+there already because it can never match twice.
+
+`mocks.yaml` is harder to read, because it stores MongoDB's wire protocol:
+the driver's handshake, the `update` that saved the URL, and the `find` that
+looked it up. You do not need to edit it. What matters is that the database's
+answers are now on disk.
+
+<Callout type="tip">
+  These are plain YAML files. Commit them with your code, review them in pull
+  requests, and delete any test you do not want.
+</Callout>
+
+## 6. Replay the recording as tests
+
+Run the same start command, with `test` instead of `record`:
+
+<Tabs>
+<Tab label="Docker Compose (easiest)">
+
+```bash title="Terminal"
+keploy test -c "docker compose up" --container-name "ginMongoApp" --delay 10
+```
+
+</Tab>
+<Tab label="Run the app natively">
+
+```bash title="Terminal"
+keploy test -c "./url-shortener" --delay 10
+```
+
+On this route you can stop the MongoDB container first. The app's database
+calls are answered from `mocks.yaml`.
+
+</Tab>
+</Tabs>
+
+`--delay 10` gives the app ten seconds to start before Keploy sends the first
+request. If your machine is slow to build the image, raise it.
+
+On the Docker route, Keploy starts only your app and its own agent during a
+replay. MongoDB is not started at all: every database call is answered from
+`mocks.yaml`. Pass `--compose-deps` if you ever want the real dependencies up
+as well.
+
+<Callout type="warning" title="“authentication timed out after 1 minute”">
+  Keploy prints a sign-in link and waits 60 seconds. In WSL the browser does
+  not open by itself, so the link is easy to miss, and Keploy then exits by
+  printing its whole help text, which hides the real error at the top. Run the
+  command again and open the link straight away. Each link works once. If the
+  timing keeps beating you, add `--manual-login`, or create an API key in your
+  Keploy account and pass it with `--api-key`.
+</Callout>
+
+Both tests pass, and Keploy saves a report you can open or archive from CI:
+
+```yaml title="keploy/reports/test-run-1/test-set-0-report.yaml (trimmed)"
+name: test-set-0-report
+status: PASSED
+success: 2
+failure: 0
+total: 2
+```
+
+## 7. Break it on purpose
+
+A test suite earns trust when it catches a real change. Open `handler.go` and
+change the redirect status on line 66:
+
+```go title="handler.go" showLineNumbers{66} {1}
+	c.Redirect(http.StatusFound, u.URL) // was http.StatusSeeOther
+```
+
+Rebuild and replay. On the native route run `go build -o url-shortener .`
+again; on the Docker route use `-c "docker compose up --build"` so the image is
+rebuilt.
+
+`test-2` now fails: it recorded a `303` and the app returns a `302`. You wrote
+no assertion for that. Keploy compared the whole response for you. Undo the
+change when you are done.
+
+## Things that trip people up
+
+### On Windows
+
+These three stopped me before I recorded a single request.
+
+- **`request returned 500 Internal Server Error for API route ...
+  dockerDesktopLinuxEngine`.** The Docker command is fine; the Docker engine is
+  not running. Open Docker Desktop and wait for "Engine running".
+- **Docker Desktop says "Virtualization support not detected".** Turn on
+  virtualization in the BIOS (Intel VT-x or AMD SVM), then run `wsl --install`
+  in an admin PowerShell and restart. Task Manager → Performance → CPU shows
+  whether virtualization is enabled.
+- **`keploy.exe` fails with "the file contains a virus or potentially unwanted
+  software".** Windows Defender blocked the native binary. Install Keploy
+  inside WSL instead, as described in step 1.
+
+### On any machine
+
+- **`authentication timed out after 1 minute`.** You did not finish the
+  sign-in link within 60 seconds. Scroll up past the help text to find this
+  line. Re-run and open the link immediately, or use `--manual-login`.
+- **`sudo: preserving the entire environment is not supported, '-E' is
+  ignored`.** Harmless. Keploy re-runs itself with `sudo` and your system
+  ignores one flag. The run continues.
+- **`curl: (7) Failed to connect to localhost port 8080`.** The app is not up.
+  `docker ps` should list `ginMongoApp` and `mongoDB`. If it is empty, run
+  `docker compose up --build` on its own first. That fixed it for me.
+- **The compose file is `docker-compose.yaml`**, and its network is external.
+  Create `keploy-network` once before the first run.
+- **The MongoDB host is on line 35 of `main.go`.** Some older guides point to
+  line 21. Search for `mongoDb:27017` instead of trusting a line number.
+- **`--container-name` is the container, not the service.** The service is
+  called `go-app`; the container is `ginMongoApp`.
+- **Port 8080 or 27017 already in use.** Stop whatever holds it, or the app
+  never starts and Keploy records nothing.
+- **A failing test is often noise, not a bug.** Timestamps, generated IDs and
+  tokens change on every run. Add the field under `noise` in the test file, for
+  example `body.ts: []`, and Keploy stops comparing it.
+- **No tests recorded?** Requests only count while `keploy record` is running,
+  and only if they reach the app Keploy started.
+
+## Where to go next
+
+- Record more behaviour: send a URL that is not in the database and capture the
+  `404`, or post a body without a `url` field and capture the `400`.
+- Run `keploy test` in CI, so a pull request that changes a response fails
+  before it merges. See the [CI/CD guide](https://keploy.io/docs/ci-cd/github/).
+- Read the [official Gin + MongoDB quickstart](https://keploy.io/docs/quickstart/samples-gin/)
+  and the [CLI reference](https://keploy.io/docs/running-keploy/cli-commands/)
+  for every flag used here.
