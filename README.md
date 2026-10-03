@@ -4,7 +4,7 @@ A single-page documentation site, built with Next.js and MDX, that walks a
 first-time user through recording and replaying API tests for Keploy's
 [Gin + MongoDB sample app](https://github.com/keploy/samples-go/tree/main/gin-mongo).
 
-**Live site:** _add your Vercel URL here_
+**Live site:** [_add your Vercel URL here_](https://keploy-gin-mongo-tutorial.vercel.app/)
 
 ## Stack
 
